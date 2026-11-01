@@ -5,12 +5,13 @@ Requires: PySide6, feedparser
 Run:      python3 simple_rss.py
 """
 import json
+import re
 import sys
 from datetime import timedelta
 
 import feedparser
-from PySide6.QtCore import QSettings, Qt, QUrl
-from PySide6.QtGui import QAction, QDesktopServices
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QImage, QTextDocument
 from PySide6.QtNetwork import (
     QNetworkAccessManager,
     QNetworkProxy,
@@ -96,6 +97,141 @@ class ProxyDialog(QDialog):
 
 
 # --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+def apply_timeout(req: QNetworkRequest, seconds: int = 20):
+    """PySide6 versions differ on whether this takes int ms or a timedelta."""
+    try:
+        req.setTransferTimeout(seconds * 1000)
+    except TypeError:
+        req.setTransferTimeout(timedelta(seconds=seconds))
+
+
+def prepare_request(req: QNetworkRequest):
+    """Common request setup.
+
+    HTTP/2 is disabled on purpose: Qt's HTTP/2 client often gets GOAWAY /
+    "unable to maintain the header compression context" errors when many
+    requests (e.g. article images) hit the same host at once.
+    """
+    req.setAttribute(QNetworkRequest.Attribute.Http2AllowedAttribute, False)
+    req.setRawHeader(b"User-Agent", USER_AGENT)
+    apply_timeout(req)
+
+
+def media_image(entry) -> str:
+    """Find an image URL in media:thumbnail / media:content / enclosures."""
+    for key in ("media_thumbnail", "media_content"):
+        for m in entry.get(key, []) or []:
+            if m.get("url") and (key == "media_thumbnail" or m.get("medium") == "image"
+                                 or str(m.get("type", "")).startswith("image")):
+                return m["url"]
+    for enc in entry.get("enclosures", []) or []:
+        if str(enc.get("type", "")).startswith("image") and enc.get("href"):
+            return enc["href"]
+    return ""
+
+
+# --------------------------------------------------------------------------
+# Article view that can download images (through the proxied network manager)
+# --------------------------------------------------------------------------
+class ArticleBrowser(QTextBrowser):
+    MAX_IMAGE_BYTES = 15 * 1024 * 1024
+
+    def __init__(self, nam: QNetworkAccessManager, parent=None):
+        super().__init__(parent)
+        self.nam = nam
+        self.base_url = QUrl()
+        self._images: dict[str, QImage] = {}  # url -> original image
+        self._pending: set[str] = set()
+        self._failed: set[str] = set()
+        self._attempts: dict[str, int] = {}
+        self._html = ""
+        self._reload_timer = QTimer(self)
+        self._reload_timer.setSingleShot(True)
+        self._reload_timer.setInterval(150)  # batch several images into one redraw
+        self._reload_timer.timeout.connect(self._reload)
+        self._placeholder = QImage(1, 1, QImage.Format.Format_ARGB32)
+        self._placeholder.fill(0)
+        self.setOpenExternalLinks(True)
+
+    def set_article(self, html: str, base: str):
+        self.base_url = QUrl(base)
+        self._html = html
+        self.setHtml(html)
+
+    def _reload(self):
+        """Re-render the current article, keeping the scroll position."""
+        bar = self.verticalScrollBar()
+        pos = bar.value()
+        self.setHtml(self._html)
+        bar.setValue(pos)
+
+    def _fit(self, img: QImage) -> QImage:
+        max_w = max(120, self.viewport().width() - 40)
+        if img.width() > max_w:
+            return img.scaledToWidth(max_w, Qt.TransformationMode.SmoothTransformation)
+        return img
+
+    def loadResource(self, rtype, name):
+        t = rtype.value if hasattr(rtype, "value") else int(rtype)
+        if t != QTextDocument.ResourceType.ImageResource.value:
+            return super().loadResource(rtype, name)
+
+        url = self.base_url.resolved(name) if name.isRelative() else name
+        if url.scheme() not in ("http", "https"):
+            return super().loadResource(rtype, name)
+
+        key = url.toString()
+        if key in self._images:
+            return self._fit(self._images[key])
+        if key not in self._pending and key not in self._failed:
+            self._fetch_image(url, key, name)
+        return self._placeholder  # blank until the download finishes
+
+    def _fetch_image(self, url: QUrl, key: str, orig_name: QUrl):
+        self._pending.add(key)
+        req = QNetworkRequest(url)
+        req.setRawHeader(b"User-Agent", USER_AGENT)
+        if self.base_url.isValid():  # some hosts block hotlinking without this
+            req.setRawHeader(b"Referer", self.base_url.toString().encode())
+        prepare_request(req)
+        reply = self.nam.get(req)
+        reply.finished.connect(lambda: self._image_done(reply, key, orig_name))
+
+    def _image_done(self, reply: QNetworkReply, key: str, orig_name: QUrl):
+        reply.deleteLater()
+        self._pending.discard(key)
+
+        img = QImage()
+        error = reply.error()
+        ok = error == QNetworkReply.NetworkError.NoError
+        if ok:
+            data = reply.readAll()
+            ok = data.size() <= self.MAX_IMAGE_BYTES and img.loadFromData(data)
+            if not ok:
+                error = None  # downloaded fine but undecodable / too big: don't retry
+
+        if not ok:
+            n = self._attempts.get(key, 0) + 1
+            self._attempts[key] = n
+            retryable = error not in (None, QNetworkReply.NetworkError.ContentNotFoundError)
+            if retryable and n < 3:
+                self._fetch_image(QUrl(key), key, orig_name)
+            else:
+                self._failed.add(key)
+                print(f"[image] giving up on {key}: {reply.errorString()}", file=sys.stderr)
+            return
+
+        self._images[key] = img
+        # addResource() takes priority over anything Qt cached for this URL
+        self.document().addResource(
+            QTextDocument.ResourceType.ImageResource, orig_name, self._fit(img)
+        )
+        self._reload_timer.start()
+
+
+# --------------------------------------------------------------------------
 # Main window
 # --------------------------------------------------------------------------
 class MainWindow(QMainWindow):
@@ -121,8 +257,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         self.feed_list = QListWidget()
         self.article_list = QListWidget()
-        self.browser = QTextBrowser()
-        self.browser.setOpenExternalLinks(True)
+        self.browser = ArticleBrowser(self.nam)
         self.browser.setPlaceholderText("Select an article to read it.")
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -273,11 +408,7 @@ class MainWindow(QMainWindow):
             b"Accept",
             b"application/atom+xml, application/rss+xml, application/xml, text/xml, */*",
         )
-        # PySide6 versions differ on whether this takes int ms or a timedelta
-        try:
-            req.setTransferTimeout(20000)
-        except TypeError:
-            req.setTransferTimeout(timedelta(seconds=20))
+        prepare_request(req)
         reply = self.nam.get(req)
         reply.finished.connect(lambda r=reply, u=url: self._on_finished(r, u))
         self.statusBar().showMessage(f"Fetching {url} …")
@@ -308,6 +439,10 @@ class MainWindow(QMainWindow):
             if e.get("content"):
                 content = e["content"][0].get("value", "")
             content = content or e.get("summary", "") or e.get("description", "")
+            if "<img" not in content.lower():
+                pic = media_image(e)
+                if pic:
+                    content = f'<p><img src="{pic}"></p>' + content
             items.append(
                 {
                     "title": e.get("title", "(untitled)"),
@@ -351,7 +486,16 @@ class MainWindow(QMainWindow):
             f"{e['html']}"
             f"<p><a href='{e['link']}'>Read original article</a></p>"
         )
-        self.browser.setHtml(html)
+        # Fixed width/height attributes break scaling in Qt's rich text engine
+        html = re.sub(
+            r"(<img\b[^>]*?)\s(?:width|height)\s*=\s*(?:\"[^\"]*\"|'[^']*'|\S+)",
+            r"\1", html, flags=re.I,
+        )
+        html = re.sub(
+            r"(<img\b[^>]*?)\s(?:width|height)\s*=\s*(?:\"[^\"]*\"|'[^']*'|\S+)",
+            r"\1", html, flags=re.I,
+        )
+        self.browser.set_article(html, e["link"])
 
     def open_in_browser(self):
         e = self._current_entry()
@@ -362,6 +506,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setDesktopFileName("simple-rss")  # matches simple-rss.desktop
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
