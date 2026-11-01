@@ -225,6 +225,48 @@ class AddFeedDialog(QDialog):
         return self.url_edit.text().strip(), self.folder_box.currentData() or ""
 
 
+class EditFeedDialog(QDialog):
+    def __init__(self, feed: dict, folders: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Feed")
+        self.setMinimumWidth(460)
+
+        self.title_edit = QLineEdit(feed.get("title", ""))
+        self.title_edit.setPlaceholderText("Leave empty to use the feed's own title")
+        self.title_edit.setClearButtonEnabled(True)
+        self.url_edit = QLineEdit(feed["url"])
+        self.url_edit.setClearButtonEnabled(True)
+        self.folder_box = QComboBox()
+        self.folder_box.addItem("(No folder)", "")
+        for name in folders:
+            self.folder_box.addItem(name, name)
+        idx = self.folder_box.findData(feed.get("folder", ""))
+        if idx >= 0:
+            self.folder_box.setCurrentIndex(idx)
+
+        form = QFormLayout(self)
+        form.addRow("Name:", self.title_edit)
+        form.addRow("Feed URL:", self.url_edit)
+        form.addRow("Folder:", self.folder_box)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _accept(self):
+        if self.url_edit.text().strip():
+            self.accept()
+
+    def values(self) -> tuple[str, str, str]:
+        return (
+            self.title_edit.text().strip(),
+            self.url_edit.text().strip(),
+            self.folder_box.currentData() or "",
+        )
+
+
 # --------------------------------------------------------------------------
 # Feed tree (folders + feeds) with drag & drop of feeds onto folders
 # --------------------------------------------------------------------------
@@ -592,8 +634,8 @@ class MainWindow(QMainWindow):
 
         act("Add Feed", ("list-add",), self.add_feed, "Ctrl+N")
         act("New Folder", ("folder-new",), self.new_folder, "Ctrl+Shift+N")
-        self.act_rename = act("Rename", ("edit-rename",), self.rename_selected, "F2",
-                              "Rename folder (F2)")
+        self.act_rename = act("Edit", ("edit-rename",), self.rename_selected, "F2",
+                              "Edit feed / rename folder (F2)")
         self.act_delete = act("Delete", ("edit-delete",), self.delete_selected,
                               QKeySequence.StandardKey.Delete, "Delete folder or feed (Del)")
         tb.addSeparator()
@@ -642,7 +684,8 @@ class MainWindow(QMainWindow):
             if isinstance(f, dict) and f.get("url"):
                 self.feeds.append(
                     {"url": f["url"], "title": f.get("title") or f["url"],
-                     "folder": f.get("folder", "") or ""}
+                     "folder": f.get("folder", "") or "",
+                     "custom_title": bool(f.get("custom_title", False))}
                 )
         self.folders = [n for n in self._json_list(self.settings.value("folders", "[]"))
                         if isinstance(n, str) and n]
@@ -822,7 +865,7 @@ class MainWindow(QMainWindow):
 
     def _on_tree_changed(self, current, _previous):
         kind = current.data(0, ROLE_KIND) if current else None
-        self.act_rename.setEnabled(kind == "folder")
+        self.act_rename.setEnabled(kind in ("folder", "feed"))
         self.act_delete.setEnabled(kind in ("folder", "feed"))
         self._populate_articles(preserve=False)
 
@@ -869,6 +912,7 @@ class MainWindow(QMainWindow):
         elif kind == "feed":
             menu.addAction(themed("view-refresh"), "Refresh Feed",
                            lambda: self._refresh_urls([key]))
+            menu.addAction(themed("edit-rename"), "Edit Feed…", lambda: self._edit_feed(key))
             current = next((f["folder"] for f in self.feeds if f["url"] == key), "")
             move = menu.addMenu(themed("folder-move", "go-next"), "Move to")
             a = move.addAction("(No folder)")
@@ -913,8 +957,12 @@ class MainWindow(QMainWindow):
 
     def rename_selected(self):
         sel = self._current_key()
-        if sel and sel[0] == "folder":
+        if not sel:
+            return
+        if sel[0] == "folder":
             self._rename_folder(sel[1])
+        elif sel[0] == "feed":
+            self._edit_feed(sel[1])
 
     def _rename_folder(self, old: str):
         new = self._ask_folder_name("Rename Folder", initial=old)
@@ -929,6 +977,48 @@ class MainWindow(QMainWindow):
             self.collapsed.add(new)
         self._save_data()
         self._rebuild_tree(select=("folder", new))
+
+    def _edit_feed(self, url: str):
+        feed = next((f for f in self.feeds if f["url"] == url), None)
+        if feed is None:
+            return
+        dlg = EditFeedDialog(feed, self.folders, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        title, new_url, folder = dlg.values()
+        if "://" not in new_url:
+            new_url = "https://" + new_url
+        if new_url != url and any(f["url"] == new_url for f in self.feeds):
+            QMessageBox.warning(self, "Edit Feed", "You're already subscribed to that URL.")
+            return
+
+        refetch = False
+        if not title:
+            if feed.get("custom_title"):  # back to the feed's own title
+                feed["custom_title"] = False
+                feed["title"] = new_url   # real title is picked up on the next fetch
+                refetch = True
+        elif title != feed["title"]:
+            feed["title"] = title
+            feed["custom_title"] = True
+
+        if new_url != url:
+            self.entries.pop(url, None)   # old articles belong to the old URL
+            feed["url"] = new_url
+            if not feed.get("custom_title"):
+                feed["title"] = new_url
+            refetch = True
+
+        feed["folder"] = folder
+        if folder:
+            self.collapsed.discard(folder)
+        for e in self.entries.get(feed["url"], []):
+            e["feed_title"] = feed["title"]
+
+        self._save_data()
+        self._rebuild_tree(select=("feed", feed["url"]))
+        if refetch:
+            self._fetch(feed["url"])
 
     def delete_selected(self):
         sel = self._current_key()
@@ -1051,7 +1141,7 @@ class MainWindow(QMainWindow):
             return
 
         title = parsed.feed.get("title", "").strip()
-        if title and feed["title"] != title:
+        if title and feed["title"] != title and not feed.get("custom_title"):
             feed["title"] = title
             self._save_data()
             for item in self._iter_items():
