@@ -1,4 +1,6 @@
-# how to install:
+# How to install:
+
+copy project to your local directory. then:
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
