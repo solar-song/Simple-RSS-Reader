@@ -1,6 +1,8 @@
 # Simple RSS Reader
 
-![Simple RSS Reader](simple_rss_reader.png)
+![simple_rss_reader_light](simple_rss_reader_light.png)
+
+![Simple RSS Reader](simple_rss_reader_dark.png)
 
 A small RSS/Atom feed reader for Linux, built with Python and Qt 6 (PySide6). Made for Fedora KDE Plasma, but it should run on any desktop with Qt 6.
 
