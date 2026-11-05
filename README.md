@@ -14,6 +14,8 @@ A small RSS/Atom feed reader for Linux, built with Python and Qt 6 (PySide6). Ma
 - Manual HTTP or SOCKS5 proxy with an on/off toggle
 - Adjustable reader font and text size
 - Follows your Plasma theme, including dark mode
+- Persistent per-feed article cache (saved in ~/.cache/simple-rss/) so recently fetched articles are available at startup
+- Auto-refresh: the app checks feeds for updates every 5 minutes
 
 ## Requirements
 
@@ -81,8 +83,12 @@ Open **Proxy Settings…**, choose HTTP or SOCKS5, and enter the host and port (
 
 Feeds, folders, and settings are saved in `~/.config/simple-rss/`. The proxy password is stored there as plain text.
 
+Fetched articles are cached per-feed in `~/.cache/simple-rss/` as JSON files (one file per feed, named by a SHA256 of the feed URL). The cache is advisory: the app loads cached articles at startup and updates the cache after each successful fetch.
+
 ## Limitations
 
-- Articles are not cached, so feeds are fetched again each time the app starts.
+- Articles are cached on disk (see above), but the cache is simple JSON and may not cover every edge case. You can clear it manually with `rm -rf ~/.cache/simple-rss/`.
 - There is no read/unread tracking.
+- The app auto-refreshes feeds every 5 minutes; there is currently no UI setting to change the interval.
+- The proxy password remains stored in plain text in the settings file (`~/.config/simple-rss/`). Consider this a known limitation; use system keyrings if you need stronger secrecy.
 - The article view is basic: heavily styled pages, embedded videos, and iframes will not display fully. Use **Open in Browser** for those.

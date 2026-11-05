@@ -1052,6 +1052,10 @@ class MainWindow(QMainWindow):
         if clicked is wipe_btn:
             for f in members:
                 self.entries.pop(f["url"], None)
+                try:
+                    self._remove_cache_for(f["url"])
+                except Exception:
+                    pass
             self.feeds = [f for f in self.feeds if f["folder"] != name]
         else:  # keep feeds: they move to the top level
             for f in members:
@@ -1160,11 +1164,20 @@ class MainWindow(QMainWindow):
                 if pic:
                     content = f'<p><img src="{html.escape(pic, quote=True)}"></p>' + content
             tm = e.get("published_parsed") or e.get("updated_parsed")
-            ts = calendar.timegm(tm) if tm else 0
-            date_str = (
-                datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-                if ts else e.get("published", e.get("updated", ""))
-            )
+            ts = 0
+            if tm:
+                try:
+                    ts = calendar.timegm(tm)
+                except Exception:
+                    ts = 0
+            try:
+                if ts and ts > 0:
+                    date_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                else:
+                    date_str = e.get("published", e.get("updated", ""))
+            except Exception:
+                # Protect against invalid dates (e.g. year 0) from malformed feeds
+                date_str = e.get("published", e.get("updated", ""))
             items.append(
                 {
                     "title": e.get("title", "(untitled)"),
