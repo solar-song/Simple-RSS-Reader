@@ -10,6 +10,7 @@ import html
 import json
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 
 import feedparser
@@ -401,6 +402,10 @@ class ArticleBrowser(QTextBrowser):
         self._resize_timer.setInterval(200)
         self._resize_timer.timeout.connect(self._relayout)
 
+        # track recent user scrolling to avoid clobbering their position
+        self._last_user_scroll = 0.0
+        self.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
+
         self.setOpenExternalLinks(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
 
@@ -483,12 +488,23 @@ class ArticleBrowser(QTextBrowser):
     def _render(self, keep_scroll: bool = True):
         if not self._entry:
             return
+        # If the user scrolled very recently, postpone auto-renders to avoid
+        # fighting with their interaction. This protects against timer-based
+        # redraws (image arrivals) that capture an outdated scrollbar value
+        # if scroll events are still pending.
+        if keep_scroll and (time.time() - getattr(self, "_last_user_scroll", 0.0) < 0.25):
+            QTimer.singleShot(250, lambda: self._render(keep_scroll))
+            return
+
         bar = self.verticalScrollBar()
         pos = bar.value() if keep_scroll else 0
         self.document().setDocumentMargin(self._margin())
         self._html = self._build_html()
         self.setHtml(self._html)
-        bar.setValue(pos)
+        try:
+            bar.setValue(pos)
+        except Exception:
+            pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -500,6 +516,10 @@ class ArticleBrowser(QTextBrowser):
         for key, img in self._images.items():
             doc.addResource(QTextDocument.ResourceType.ImageResource, self._names[key], self._fit(img))
         self._render()
+
+    def _on_user_scroll(self, _val: int):
+        """Record recent user scroll activity (valueChanged signal)."""
+        self._last_user_scroll = time.time()
 
     # ---- image loading --------------------------------------------------
     def loadResource(self, rtype, name):
