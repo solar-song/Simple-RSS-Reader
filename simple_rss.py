@@ -402,18 +402,12 @@ class ArticleBrowser(QTextBrowser):
         self._resize_timer.setInterval(200)
         self._resize_timer.timeout.connect(self._relayout)
 
-<<<<<<< HEAD
-        # track recent user scrolling to avoid clobbering their position
-        self._last_user_scroll = 0.0
-        self.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
-=======
         # scrolling helpers: detect real user scroll vs programmatic setValue
         self._last_user_scroll = 0.0
         self._suppress_user_scroll = False
         self.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
         # remember last HTML to avoid no-op re-renders
         self._last_html_rendered = ""
->>>>>>> 195890e (chore: record code changes - caching, auto-refresh, scrollbar stability, image rendering)
 
         self.setOpenExternalLinks(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -507,17 +501,9 @@ class ArticleBrowser(QTextBrowser):
         if not self._entry:
             return
         # If the user scrolled very recently, postpone auto-renders to avoid
-<<<<<<< HEAD
-        # fighting with their interaction. This protects against timer-based
-        # redraws (image arrivals) that capture an outdated scrollbar value
-        # if scroll events are still pending.
-        if keep_scroll and (time.time() - getattr(self, "_last_user_scroll", 0.0) < 0.25):
-            QTimer.singleShot(250, lambda: self._render(keep_scroll))
-=======
         # fighting with their interaction.
         if keep_scroll and (time.time() - getattr(self, "_last_user_scroll", 0.0) < 0.12):
             QTimer.singleShot(150, lambda: self._render(keep_scroll))
->>>>>>> 195890e (chore: record code changes - caching, auto-refresh, scrollbar stability, image rendering)
             return
 
         bar = self.verticalScrollBar()
@@ -536,11 +522,6 @@ class ArticleBrowser(QTextBrowser):
             return
 
         self.setHtml(self._html)
-<<<<<<< HEAD
-        try:
-            bar.setValue(pos)
-        except Exception:
-=======
         self._last_html_rendered = self._html
 
         # restore by fraction; avoid tiny back-and-forth adjustments
@@ -554,7 +535,6 @@ class ArticleBrowser(QTextBrowser):
             QTimer.singleShot(0, lambda: setattr(self, '_suppress_user_scroll', False))
         except Exception:
             self._suppress_user_scroll = False
->>>>>>> 195890e (chore: record code changes - caching, auto-refresh, scrollbar stability, image rendering)
             pass
 
     def resizeEvent(self, event):
@@ -577,10 +557,6 @@ class ArticleBrowser(QTextBrowser):
         """
         if getattr(self, '_suppress_user_scroll', False):
             return
-        self._last_user_scroll = time.time()
-
-    def _on_user_scroll(self, _val: int):
-        """Record recent user scroll activity (valueChanged signal)."""
         self._last_user_scroll = time.time()
 
     # ---- image loading --------------------------------------------------
