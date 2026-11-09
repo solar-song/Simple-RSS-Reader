@@ -394,7 +394,7 @@ class ArticleBrowser(QTextBrowser):
 
         self._reload_timer = QTimer(self)  # batches several images into one redraw
         self._reload_timer.setSingleShot(True)
-        self._reload_timer.setInterval(150)
+        self._reload_timer.setInterval(120)
         self._reload_timer.timeout.connect(self._render)
 
         self._resize_timer = QTimer(self)
@@ -402,9 +402,18 @@ class ArticleBrowser(QTextBrowser):
         self._resize_timer.setInterval(200)
         self._resize_timer.timeout.connect(self._relayout)
 
+<<<<<<< HEAD
         # track recent user scrolling to avoid clobbering their position
         self._last_user_scroll = 0.0
         self.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
+=======
+        # scrolling helpers: detect real user scroll vs programmatic setValue
+        self._last_user_scroll = 0.0
+        self._suppress_user_scroll = False
+        self.verticalScrollBar().valueChanged.connect(self._on_user_scroll)
+        # remember last HTML to avoid no-op re-renders
+        self._last_html_rendered = ""
+>>>>>>> 195890e (chore: record code changes - caching, auto-refresh, scrollbar stability, image rendering)
 
         self.setOpenExternalLinks(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -443,8 +452,17 @@ class ArticleBrowser(QTextBrowser):
         """
 
     def _margin(self) -> int:
-        """Side margin that keeps the text in a comfortable centered column."""
-        return max(28, (self.viewport().width() - self.MAX_COLUMN) // 2)
+        """Side margin that keeps the text in a comfortable centered column.
+
+        Reserve space for a vertical scrollbar so that showing/hiding it does
+        not change the content width and trigger reflows that flip layout.
+        """
+        vw = self.viewport().width()
+        try:
+            reserve = self.verticalScrollBar().sizeHint().width()
+        except Exception:
+            reserve = 16
+        return max(28, (vw - reserve - self.MAX_COLUMN) // 2)
 
     def _fit(self, img: QImage) -> QImage:
         max_w = max(120, self.viewport().width() - 2 * self._margin())
@@ -489,21 +507,54 @@ class ArticleBrowser(QTextBrowser):
         if not self._entry:
             return
         # If the user scrolled very recently, postpone auto-renders to avoid
+<<<<<<< HEAD
         # fighting with their interaction. This protects against timer-based
         # redraws (image arrivals) that capture an outdated scrollbar value
         # if scroll events are still pending.
         if keep_scroll and (time.time() - getattr(self, "_last_user_scroll", 0.0) < 0.25):
             QTimer.singleShot(250, lambda: self._render(keep_scroll))
+=======
+        # fighting with their interaction.
+        if keep_scroll and (time.time() - getattr(self, "_last_user_scroll", 0.0) < 0.12):
+            QTimer.singleShot(150, lambda: self._render(keep_scroll))
+>>>>>>> 195890e (chore: record code changes - caching, auto-refresh, scrollbar stability, image rendering)
             return
 
         bar = self.verticalScrollBar()
-        pos = bar.value() if keep_scroll else 0
+        # preserve scroll as a fraction to survive content height changes
+        if keep_scroll:
+            cur_max = max(1, bar.maximum())
+            frac = bar.value() / cur_max
+        else:
+            frac = 0.0
+
         self.document().setDocumentMargin(self._margin())
         self._html = self._build_html()
+
+        # skip repaint if HTML didn't change and there are no pending images
+        if self._html == getattr(self, "_last_html_rendered", "") and not self._pending:
+            return
+
         self.setHtml(self._html)
+<<<<<<< HEAD
         try:
             bar.setValue(pos)
         except Exception:
+=======
+        self._last_html_rendered = self._html
+
+        # restore by fraction; avoid tiny back-and-forth adjustments
+        try:
+            self._suppress_user_scroll = True
+            new_max = max(1, bar.maximum())
+            new_pos = int(frac * new_max)
+            # only change if it differs sufficiently to avoid jitter
+            if abs(new_pos - bar.value()) > 2:
+                bar.setValue(new_pos)
+            QTimer.singleShot(0, lambda: setattr(self, '_suppress_user_scroll', False))
+        except Exception:
+            self._suppress_user_scroll = False
+>>>>>>> 195890e (chore: record code changes - caching, auto-refresh, scrollbar stability, image rendering)
             pass
 
     def resizeEvent(self, event):
@@ -515,7 +566,18 @@ class ArticleBrowser(QTextBrowser):
         doc = self.document()
         for key, img in self._images.items():
             doc.addResource(QTextDocument.ResourceType.ImageResource, self._names[key], self._fit(img))
-        self._render()
+        # schedule a single redraw rather than immediate to avoid rapid churn
+        if not self._reload_timer.isActive():
+            self._reload_timer.start()
+
+    def _on_user_scroll(self, _val: int):
+        """Record recent user scroll activity and ignore programmatic sets.
+
+        Called from verticalScrollBar().valueChanged.
+        """
+        if getattr(self, '_suppress_user_scroll', False):
+            return
+        self._last_user_scroll = time.time()
 
     def _on_user_scroll(self, _val: int):
         """Record recent user scroll activity (valueChanged signal)."""
@@ -576,7 +638,9 @@ class ArticleBrowser(QTextBrowser):
         self.document().addResource(
             QTextDocument.ResourceType.ImageResource, orig_name, self._fit(img)
         )
-        self._reload_timer.start()
+        # schedule a single reload; multiple image_done calls will coalesce
+        if not self._reload_timer.isActive():
+            self._reload_timer.start()
 
 
 # --------------------------------------------------------------------------
