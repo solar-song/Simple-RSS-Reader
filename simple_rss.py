@@ -436,6 +436,8 @@ class ArticleBrowser(QTextBrowser):
             a {{ color: {link}; text-decoration: none; }}
             p, li {{ line-height: 150%; }}
             p {{ margin-top: 0px; margin-bottom: 12px; }}
+            img {{ max-width: 100%; height: auto; display: block; margin: 0 auto 14px; }}
+            figure, .wp-block-image, .wp-block-image figure {{ margin: 0 0 14px 0; }}
             h1 {{ font-size: {b * 1.6:.1f}pt; font-weight: 700; margin-top: 22px; margin-bottom: 8px; }}
             h2 {{ font-size: {b * 1.4:.1f}pt; font-weight: 700; margin-top: 20px; margin-bottom: 8px; }}
             h3 {{ font-size: {b * 1.2:.1f}pt; font-weight: 700; margin-top: 18px; margin-bottom: 6px; }}
@@ -484,6 +486,36 @@ class ArticleBrowser(QTextBrowser):
         body = strip_img_size(e["html"]) or (
             "<p><i>This feed item has no content. Use “Open in Browser”.</i></p>"
         )
+        # Normalize image markup: convert paragraphs that only contain an image
+        # into a zero-margin centered div and ensure images have inline styles
+        # that avoid baseline gaps and large bottom whitespace in Qt's rich text.
+        try:
+            # paragraphs that only contain an image
+            body = re.sub(r"<p>\s*(<img[^>]+>)\s*</p>", r'<div style="text-align:center;margin:0">\1</div>', body, flags=re.I)
+
+            def _img_style(m):
+                tag = m.group(0)
+                attrs = m.group(1) or ""
+                # if style exists, append our safe styles; otherwise add a new style
+                mstyle = re.search(r'style\s*=\s*"([^"]*)"', attrs, re.I)
+                safe = "display:block;max-width:100%;height:auto;margin:0 auto 18px;"
+                if mstyle:
+                    existing = mstyle.group(1)
+                    # avoid duplicating if already present
+                    if "display:block" in existing:
+                        # ensure margin-bottom exists; add if missing
+                        if "margin-bottom" in existing or "margin:" in existing:
+                            return tag
+                        newstyle = existing.rstrip() + ";margin-bottom:18px;"
+                        return re.sub(r'style\s*=\s*"[^"]*"', f'style="{newstyle}"', tag, flags=re.I)
+                    newstyle = existing.rstrip() + ";" + safe
+                    return re.sub(r'style\s*=\s*"[^"]*"', f'style="{newstyle}"', tag, flags=re.I)
+                else:
+                    return tag.replace('<img', '<img style="' + safe + '"', 1)
+
+            body = re.sub(r'<img\b([^>]*)>', _img_style, body, flags=re.I)
+        except Exception:
+            pass
         footer = ""
         if e["link"]:
             footer = (
